@@ -24,24 +24,26 @@ def task_2():
     con = sqlite3.connect("library.sqlite")
 
     df = pd.read_sql('''
-         select author_name as Автор, count(author_id) as Количество from author as tmp
-        join book_author using (author_id)
-        join book using (book_id)
-            where available_numbers = 0
-                group by author_name
-    union
+    WITH AuthorsWithZeroAvailability AS (
+        select author_name as Количество from author as tmp
+            join book_author using (author_id)
+            join book using (book_id)
+                where available_numbers = 0
+                    group by author_name
+        )
+    
+     select author_name as Автор, count(author_id) as Количество from author as tmp
+            join book_author using (author_id)
+            join book using (book_id)
+                where available_numbers = 0
+                    group by author_name
+        union
     select author_name as Автор, 'нет' as Количество from author
-        join book_author using (author_id)
-        join book using (book_id)
-            where available_numbers > 0 and author.author_name not in (
-                    select author_name as Количество from author as tmp
-                        join book_author using (author_id)
-                        join book using (book_id)
-                            where available_numbers = 0
-                                group by author_name
-                )
-                group by author_name
-                order by Автор
+            join book_author using (author_id)
+            join book using (book_id)
+                where available_numbers > 0 and author.author_name not in AuthorsWithZeroAvailability
+                    group by author_name
+                    order by Автор
     ''', con)
 
     print(df)
@@ -52,16 +54,20 @@ def task_3():
     con = sqlite3.connect("library.sqlite")
 
     df = pd.read_sql('''
-        select title as Название, publisher_name as Издательсво, year_publication as Год, popularity as Количество
-       from book
-    join publisher using (publisher_id)
-    join (select book_id, count(book_id) as popularity
+    WITH Popularity AS (
+    select book_id, count(book_id) as popularity
           from book_reader
           group by book_id
           having popularity = (select max(popularity) as max_value
                                from (select book_id, count(book_id) as popularity
                                      from book_reader
-                                     group by book_id)))
+                                     group by book_id))
+        )
+
+    select title as Название, publisher_name as Издательсво, year_publication as Год, popularity as Количество
+       from book
+    join publisher using (publisher_id)
+    join Popularity
     using (book_id)
     order by Название, Издательсво, Год desc
     ''', con)
@@ -94,71 +100,10 @@ def init_new_book_table():
     con.close()
 
 
-def get_existed_books():
-    con = sqlite3.connect("library.sqlite")
-    cursor = con.cursor()
-    cursor.execute('''
-             select * from new_book
-                except
-                select * from new_book
-                where title in
-                (select title from
-                    (select title, publisher_name, year_publication from new_book
-                        except
-                    select title, publisher_name, year_publication from book
-                        join publisher using (publisher_id)))
-            ''')
-    return cursor.fetchall()
-
-
-def get_not_existed_books():
-    con = sqlite3.connect("library.sqlite")
-    cursor = con.cursor()
-    cursor.execute('''
-        select * from new_book
-            where title in
-            (select title from
-                (select title, publisher_name, year_publication from new_book
-                    except
-                select title, publisher_name, year_publication from book
-                    join publisher using (publisher_id)))
-            ''')
-    return cursor.fetchall()
-
-
-def update_book_table(con, task):
-    sql = ''' UPDATE book
-              SET available_numbers = ?
-              WHERE title = ?'''
-    cur = con.cursor()
-    cur.execute(sql, task)
-    con.commit()
-
-
-def create_book(con, task):
-    sql = ''' INSERT INTO book(title, genre_id, publisher_id, year_publication, available_numbers)
-              VALUES(?, ?, ?, ?, ?) '''
-    cur = con.cursor()
-    cur.execute(sql, task)
-    con.commit()
-
-    return cur.lastrowid
-
-
-def get_publisher_book_id(con, task):
-    sql = ''' SELECT publisher_id FROM PUBLISHER
-                    WHERE publisher_name = ?'''
-    cur = con.cursor()
-    cur.execute(sql, task)
-    return cur.fetchall()[0][0]
-
-
 def task_4():
     con = sqlite3.connect("library.sqlite")
+    cursor = con.cursor()
     init_new_book_table()
-
-    existed_data = get_existed_books()
-    not_existed_data = get_not_existed_books()
 
     df = pd.read_sql('''
         SELECT title, genre_id, publisher_id, year_publication, available_numbers FROM book
@@ -166,18 +111,45 @@ def task_4():
     print('before updating books:')
     print(df)
 
-    with con:
-        for new_book in existed_data:
-            update_book_table(con, (new_book[3], new_book[0]))
-        for new_book in not_existed_data:
-            create_book(con, (new_book[0],
-                              '',
-                              get_publisher_book_id(con, (new_book[1],)),
-                              new_book[2],
-                              new_book[3]))
+    cursor.execute('''
+        UPDATE book
+        SET available_numbers = available_numbers + ( -- вложенным запросом находим кол-во экземпляров
+            SELECT amount
+            FROM new_book
+            NATURAL JOIN publisher
+            WHERE book.title = new_book.title
+            AND publisher_name = new_book.publisher_name
+            AND book.year_publication = new_book.year_publication
+        )
+        WHERE EXISTS (  -- условный подзапрос на существование книги в библиотеке
+            SELECT *  -- вернет хотя бы одну строку если книга существует
+            FROM new_book
+            NATURAL JOIN publisher
+            WHERE book.title = new_book.title
+            AND publisher_name = new_book.publisher_name
+            AND book.year_publication = new_book.year_publication
+        );
+    ''')
+
+    cursor.execute('''
+        INSERT INTO book (title, genre_id, publisher_id, year_publication, available_numbers)
+        SELECT
+            new_book.title,
+            NULL,
+            publisher_name,
+            new_book.year_publication,
+            new_book.amount
+        FROM new_book
+        NATURAL JOIN publisher -- для таблицы publisher
+        LEFT JOIN book ON
+            book.title = new_book.title
+            AND publisher_name = new_book.publisher_name
+            AND book.year_publication = new_book.year_publication
+        WHERE book.book_id IS NULL;
+    ''')
 
     df = pd.read_sql('''
-            SELECT title, genre_id, publisher_id, year_publication, available_numbers FROM book
+        SELECT title, genre_id, publisher_id, year_publication, available_numbers FROM book
         ''', con)
     print('after updating books:')
     print(df)
@@ -189,34 +161,29 @@ def task_5():
     con = sqlite3.connect("library.sqlite")
 
     df = pd.read_sql('''
-        select title as Название,
-        genre_name as Жанр,
-        publisher_name as Издатель,
-            'меньше на ' || avg(abs(available_numbers - (select round(avg(available_numbers)) from book)))
-            over (partition by title) as Отклонение
-        from book
-            join publisher using (publisher_id)
-            join genre using (genre_id)
-        where (available_numbers - (select round(avg(available_numbers)) from book)) < 0
-union
-select title as Название,
-        genre_name as Жанр,
-        publisher_name as Издатель,
-            'больше на ' || avg(abs(available_numbers - (select round(avg(available_numbers)) from book)))
-            over (partition by title) as Отклонение
-        from book
-            join publisher using (publisher_id)
-            join genre using (genre_id)
-        where (available_numbers - (select round(avg(available_numbers)) from book)) > 0
-union
-select title as Название,
-        genre_name as Жанр,
-        publisher_name as Издатель,
-            'равно среднему'
-        from book
-            join publisher using (publisher_id)
-            join genre using (genre_id)
-        where (available_numbers - (select round(avg(available_numbers)) from book)) = 0
+    WITH BookAvg AS (
+        SELECT
+            bookTable.title,
+            bookTable.genre_id,
+            bookTable.publisher_id,
+            bookTable.available_numbers,
+            AVG(bookTable.available_numbers) OVER () AS avg_available
+        FROM book bookTable
+    )
+    
+    SELECT
+        title,
+        genreTable.genre_name,
+        pubTable.publisher_name,
+        CASE
+            WHEN ROUND(available_numbers) = ROUND(avg_available) THEN 'равно среднему'
+            WHEN ROUND(available_numbers) > ROUND(avg_available) THEN 'больше на ' || (ROUND(available_numbers) - (avg_available))
+            ELSE 'меньше на ' || (ROUND(avg_available) - ROUND(available_numbers))
+        END AS Отклонение
+    FROM BookAvg ba
+    JOIN genre genreTable ON ba.genre_id = genreTable.genre_id
+    JOIN publisher pubTable ON ba.publisher_id = pubTable.publisher_id
+    ORDER BY title, Отклонение;
     ''', con)
 
     print(df)
