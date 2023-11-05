@@ -113,22 +113,13 @@ def task_4():
 
     cursor.execute('''
         UPDATE book
-        SET available_numbers = available_numbers + ( -- вложенным запросом находим кол-во экземпляров
-            SELECT amount
-            FROM new_book
-            NATURAL JOIN publisher
-            WHERE book.title = new_book.title
-            AND publisher_name = new_book.publisher_name
-            AND book.year_publication = new_book.year_publication
-        )
-        WHERE EXISTS (  -- условный подзапрос на существование книги в библиотеке
-            SELECT *  -- вернет хотя бы одну строку если книга существует
-            FROM new_book
-            NATURAL JOIN publisher
-            WHERE book.title = new_book.title
-            AND publisher_name = new_book.publisher_name
-            AND book.year_publication = new_book.year_publication
-        );
+        SET available_numbers = available_numbers + nb.amount
+        FROM (
+            SELECT amount, book.title, book.year_publication
+            FROM book
+            INNER JOIN new_book nb ON book.title = nb.title AND book.year_publication = nb.year_publication
+        ) AS nb
+        WHERE book.title = nb.title AND book.year_publication = nb.year_publication;
     ''')
 
     cursor.execute('''
@@ -161,29 +152,19 @@ def task_5():
     con = sqlite3.connect("library.sqlite")
 
     df = pd.read_sql('''
-    WITH BookAvg AS (
-        SELECT
-            bookTable.title,
-            bookTable.genre_id,
-            bookTable.publisher_id,
-            bookTable.available_numbers,
-            AVG(bookTable.available_numbers) OVER () AS avg_available
-        FROM book bookTable
-    )
-    
     SELECT
-        title,
-        genreTable.genre_name,
-        pubTable.publisher_name,
+        title as Название,
+        genre_name as Жанр,
+        publisher_name as Издатель,
         CASE
-            WHEN ROUND(available_numbers) = ROUND(avg_available) THEN 'равно среднему'
-            WHEN ROUND(available_numbers) > ROUND(avg_available) THEN 'больше на ' || (ROUND(available_numbers) - (avg_available))
-            ELSE 'меньше на ' || (ROUND(avg_available) - ROUND(available_numbers))
+            WHEN ROUND(available_numbers) = ROUND(avg(available_numbers) over ()) THEN 'равно среднему'
+            WHEN ROUND(available_numbers) > ROUND(avg(available_numbers) over ()) THEN 'больше на ' || (ROUND(available_numbers) - ROUND(avg(available_numbers) over ()))
+            ELSE 'меньше на ' || (ROUND(avg(available_numbers) over ()) - ROUND(available_numbers))
         END AS Отклонение
-    FROM BookAvg ba
-    JOIN genre genreTable ON ba.genre_id = genreTable.genre_id
-    JOIN publisher pubTable ON ba.publisher_id = pubTable.publisher_id
-    ORDER BY title, Отклонение;
+    from book
+    natural join genre
+    natural join publisher
+    ORDER BY Название, Отклонение;
     ''', con)
 
     print(df)
